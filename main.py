@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QComboBox, QSlider, QLabel, QCheckBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QComboBox, QSlider, QLabel, QCheckBox, QPushButton
 from PyQt5.QtCore import pyqtSignal, QObject, Qt, QTimer, QSize
 from pyqtgraph import PlotWidget
 import sys
@@ -63,7 +63,9 @@ class JoyLab(QMainWindow):
         self.servo_mode = 'Current Based Position Control'
         self.joystick_mode = 'Center'
         self.user_is_dragging = False  # For overriding controls with user input
+        self.is_test_sequence_running = False  # For overriding controls with test sequence
         self.user_mouse_pos = None  # For storing the user's mouse position
+        self.center_pos = [2589, 2667]
 
         # Data buffers
         self.present_positions = deque(maxlen=100)
@@ -108,6 +110,11 @@ class JoyLab(QMainWindow):
         self.torque_checkbox = QCheckBox("Enable Torque")
         self.torque_checkbox.setChecked(True)
 
+        # Create a pushbutton for test sequence
+        # Create the test sequence button
+        self.test_sequence_button = QPushButton("Run Test Sequence")
+        self.test_sequence_button.clicked.connect(self.start_test_sequence_thread)
+
         # Create labels for the dropdowns and current_limit_slider
         joystick_mode_label = QLabel('Joystick Mode:')
         servo_mode_label = QLabel('Servo Control Mode:')
@@ -117,6 +124,7 @@ class JoyLab(QMainWindow):
         # Create the layout and add widgets
         layout = QVBoxLayout()
         layout.addWidget(self.torque_checkbox)
+        layout.addWidget(self.test_sequence_button)
         layout.addWidget(joystick_mode_label)
         layout.addWidget(self.joystick_mode_dropdown)
         layout.addWidget(servo_mode_label)
@@ -193,7 +201,7 @@ class JoyLab(QMainWindow):
             self.error_plot.plot(trimmed_timestamps, goal_magnitudes, pen='b', name="Goal Position")
 
             # Set Y-axis range (optional)
-            self.error_plot.plotItem.vb.setYRange(3000, 4000)
+            self.error_plot.plotItem.vb.setYRange(3000, 5000)
 
             # Set X-axis to only show the past 10 seconds
             if len(trimmed_timestamps) > 1:
@@ -211,13 +219,12 @@ class JoyLab(QMainWindow):
 
     def mouse_control(self, pos):
         self.user_mouse_pos = [int(pos[0]), int(pos[1])]
-        print(self.user_mouse_pos)
 
     def calculate_standard_position(self):
         goal_pos = None
         match self.joystick_mode:
             case 'Center':
-                goal_pos = self.user_mouse_pos if self.user_is_dragging else [2589, 2667]  # in future, should match self.joystick_mode
+                goal_pos = self.user_mouse_pos if self.user_is_dragging else self.center_pos
             case 'Follow':
                 goal_pos = self.user_mouse_pos if self.user_is_dragging else self.present_positions[-1]
             case 'Walls':
@@ -233,6 +240,80 @@ class JoyLab(QMainWindow):
             return None  # in future, should match self.joystick_mode
         else:
             return None
+
+    def start_test_sequence_thread(self):
+        """
+        Start the test sequence in its own thread.
+        """
+        test_sequence_thread = threading.Thread(target=self.run_test_sequence)
+        test_sequence_thread.start()
+
+    def run_test_sequence(self):
+        """
+        Function to command the robotic joystick to move in a circle.
+
+        """
+        self.is_test_sequence_running = True
+        radius_in_encoder_ticks = 300
+
+        # Circle in one direction
+        for angle in np.linspace(0, 2 * np.pi, 250):
+            x = int(self.center_pos[0] + radius_in_encoder_ticks * np.cos(angle))
+            y = int(self.center_pos[1] + radius_in_encoder_ticks * np.sin(angle))
+            self.goal_positions.append([x, y])
+            self.serial_manager.send_message('goal_positions', [x, y])
+
+        # Circle in the opposite direction
+        for angle in np.linspace(2 * np.pi, 0, 250):
+            x = int(self.center_pos[0] + radius_in_encoder_ticks * np.cos(angle))
+            y = int(self.center_pos[1] + radius_in_encoder_ticks * np.sin(angle))
+            self.goal_positions.append([x, y])
+            self.serial_manager.send_message('goal_positions', [x, y])
+
+        self.serial_manager.send_message('goal_positions', self.center_pos)
+        time.sleep(0.3)
+
+        for i in range(2):
+            # Trace out a '+' pattern
+            for offset in np.linspace(-radius_in_encoder_ticks, radius_in_encoder_ticks, 300):
+                self.goal_positions.append([self.center_pos[0] + offset, self.center_pos[1]])
+                self.serial_manager.send_message('goal_positions', [self.center_pos[0] + offset, self.center_pos[1]])
+
+            self.serial_manager.send_message('goal_positions', self.center_pos)
+
+            for offset in np.linspace(-radius_in_encoder_ticks, radius_in_encoder_ticks, 300):
+                self.goal_positions.append([self.center_pos[0], self.center_pos[1] + offset])
+                self.serial_manager.send_message('goal_positions', [self.center_pos[0], self.center_pos[1] + offset])
+
+            self.serial_manager.send_message('goal_positions', self.center_pos)
+
+        # Circle in one direction
+        for angle in np.linspace(0, 2 * np.pi, 300):
+            x = int(self.center_pos[0] + radius_in_encoder_ticks * np.cos(angle))
+            y = int(self.center_pos[1] + radius_in_encoder_ticks * np.sin(angle))
+            self.goal_positions.append([x, y])
+            self.serial_manager.send_message('goal_positions', [x, y])
+
+        time.sleep(0.8)
+        self.serial_manager.send_message('goal_positions', self.center_pos)
+
+        """
+        # Spiral outwards
+        for radius in np.linspace(50, radius_in_encoder_ticks, 25):  # Reduced to 25 points
+            for angle in np.linspace(0, 2 * np.pi, 50):  # Reduced to 50 points
+                x = int(self.center_pos[0] + radius * np.cos(angle))
+                y = int(self.center_pos[1] + radius * np.sin(angle))
+                self.serial_manager.send_message('goal_positions', [x, y])
+
+        # Spiral back to the center
+        for radius in np.linspace(radius_in_encoder_ticks, 50, 25):  # Reduced to 25 points
+            for angle in np.linspace(0, 2 * np.pi, 50):  # Reduced to 50 points
+                x = int(self.center_pos[0] + radius * np.cos(angle))
+                y = int(self.center_pos[1] + radius * np.sin(angle))
+                self.serial_manager.send_message('goal_positions', [x, y])
+        """
+
+        self.is_test_sequence_running = False
 
 
 class SerialManager(QObject):
@@ -280,16 +361,17 @@ class SerialManager(QObject):
             if positions:
                 self.new_position_signal.emit(positions)
 
-            match self.joylab.servo_mode:
-                case 'Current Based Position Control':
-                    positions = self.joylab.calculate_standard_position()
-                    self.send_message('goal_positions', positions)
-                case 'Position Control':
-                    goal_positions = self.joylab.calculate_standard_position()
-                    self.send_message('goal_positions', goal_positions)
-                case 'Current PID Position Control':
-                    goal_currents = self.joylab.calculate_pid_currents()
-                    self.send_message('goal_currents', goal_currents)
+            if not self.joylab.is_test_sequence_running:
+                match self.joylab.servo_mode:
+                    case 'Current Based Position Control':
+                        positions = self.joylab.calculate_standard_position()
+                        self.send_message('goal_positions', positions)
+                    case 'Position Control':
+                        goal_positions = self.joylab.calculate_standard_position()
+                        self.send_message('goal_positions', goal_positions)
+                    case 'Current PID Position Control':
+                        goal_currents = self.joylab.calculate_pid_currents()
+                        self.send_message('goal_currents', goal_currents)
 
 
 if __name__ == "__main__":
