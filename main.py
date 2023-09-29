@@ -25,7 +25,7 @@ class CustomPlotWidget(PlotWidget):
         self.plotItem.vb.setYRange(2000, 3350)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_mouse_pos)
-        self.timer.setInterval(5)  # Update every 50 milliseconds
+        self.timer.setInterval(16)
 
     def mousePressEvent(self, event):
         self.mouse_dragging = True
@@ -149,8 +149,6 @@ class JoyLab(QMainWindow):
     def on_joystick_mode_changed(self, index):
         selected_option = self.joystick_mode_dropdown.itemText(index)
         self.joystick_mode = selected_option
-        print(f"Dropdown 1 selected option: {selected_option}")
-        # Add logic here for what should happen when joystick_mode_dropdown changes
 
     def on_servo_mode_changed(self, index):
         selected_option = self.servo_mode_dropdown.itemText(index)
@@ -213,20 +211,24 @@ class JoyLab(QMainWindow):
 
     def mouse_control(self, pos):
         self.user_mouse_pos = [int(pos[0]), int(pos[1])]
+        print(self.user_mouse_pos)
 
-    def calculate_current_based_position(self):
-        goal_pos = self.user_mouse_pos if self.user_is_dragging else [2350, 2350]  # in future, should match self.joystick_mode
+    def calculate_standard_position(self):
+        goal_pos = None
+        match self.joystick_mode:
+            case 'Center':
+                goal_pos = self.user_mouse_pos if self.user_is_dragging else [2589, 2667]  # in future, should match self.joystick_mode
+            case 'Follow':
+                goal_pos = self.user_mouse_pos if self.user_is_dragging else self.present_positions[-1]
+            case 'Walls':
+                pass
+            case 'Maze':
+                pass
         if goal_pos is not None:
             self.goal_positions.append(goal_pos)
         return goal_pos
 
-    def calculate_position_based_position(self):
-        goal_pos = self.user_mouse_pos if self.user_is_dragging else [2350, 2350]  # in future, should match self.joystick_mode
-        if goal_pos is not None:
-            self.goal_positions.append(goal_pos)
-        return goal_pos
-
-    def calculate_current_pid_based_position(self):
+    def calculate_pid_currents(self):
         if self.user_mouse_pos is None:
             return None  # in future, should match self.joystick_mode
         else:
@@ -280,14 +282,14 @@ class SerialManager(QObject):
 
             match self.joylab.servo_mode:
                 case 'Current Based Position Control':
-                    positions = self.joylab.calculate_current_based_position()
+                    positions = self.joylab.calculate_standard_position()
                     self.send_message('goal_positions', positions)
-                case 'Current PID Position Control':
-                    goal_currents = self.joylab.calculate_current_pid_based_position()
-                    self.send_message('goal_currents', goal_currents)
                 case 'Position Control':
-                    goal_positions = self.joylab.calculate_position_based_position()
+                    goal_positions = self.joylab.calculate_standard_position()
                     self.send_message('goal_positions', goal_positions)
+                case 'Current PID Position Control':
+                    goal_currents = self.joylab.calculate_pid_currents()
+                    self.send_message('goal_currents', goal_currents)
 
 
 if __name__ == "__main__":
