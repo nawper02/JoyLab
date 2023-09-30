@@ -1,4 +1,5 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QComboBox, QSlider, QLabel, QCheckBox, QPushButton
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QComboBox, QSlider, QLabel, QCheckBox, \
+    QPushButton, QLineEdit, QHBoxLayout
 from PyQt5.QtCore import pyqtSignal, QObject, Qt, QTimer, QSize
 from pyqtgraph import PlotWidget
 import sys
@@ -39,7 +40,7 @@ class CustomPlotWidget(PlotWidget):
         self.timer.stop()
         super().mouseReleaseEvent(event)
 
-    #def mouseMoveEvent(self, event):
+    # def mouseMoveEvent(self, event):
     #    if self.mouse_dragging:
     #        pos = event.pos()
     #        if self.plotItem.vb.sceneBoundingRect().contains(pos):
@@ -66,6 +67,8 @@ class JoyLab(QMainWindow):
         self.is_test_sequence_running = False  # For overriding controls with test sequence
         self.user_mouse_pos = None  # For storing the user's mouse position
         self.center_pos = [2589, 2667]
+        self.servo_modes_map = {'Position Control': 3, 'Current Based Position Control': 5,
+                                'Current PID Position Control': 0}
 
         # Data buffers
         self.present_positions = deque(maxlen=100)
@@ -73,16 +76,23 @@ class JoyLab(QMainWindow):
         self.timestamps = deque(maxlen=100)
         self.errors = deque(maxlen=100)
 
+        # PID
+        self.Kp = 0.3  # Proportional gain
+        self.Ki = 0.000  # Integral gain
+        self.Kd = 2.0  # Derivative gain
+        self.prev_errors = deque([[0, 0]], maxlen=100)  # Initialize with zero error
+        self.integral = [0, 0]  # Initialize integral term
+
         self.serial_manager = SerialManager(self, port="/dev/cu.usbmodem14101")  # Replace with your port name
         self.serial_manager.connect()
 
         # Plot for joystick position
         self.plot = CustomPlotWidget(self)
-        self.plot.setFixedSize(QSize(400, 400))
+        self.plot.setFixedSize(QSize(300, 300))
 
         # Plot for error
         self.error_plot = CustomPlotWidget(self)
-        self.error_plot.setFixedSize(QSize(800, 200))
+        self.error_plot.setFixedSize(QSize(500, 200))
         self.error_plot.plotItem.setLabel('left', 'Control Magnitudes')
         self.error_plot.plotItem.setLabel('bottom', 'Time')
 
@@ -91,7 +101,6 @@ class JoyLab(QMainWindow):
         self.joystick_mode_dropdown.addItem("Center")
         self.joystick_mode_dropdown.addItem("Follow")
         self.joystick_mode_dropdown.addItem("Walls")
-        self.joystick_mode_dropdown.addItem("Maze")
         self.joystick_mode_dropdown.setCurrentText(self.joystick_mode)
 
         self.servo_mode_dropdown = QComboBox()
@@ -121,6 +130,34 @@ class JoyLab(QMainWindow):
         slider_label = QLabel('Servo Current Limit (%):')
         self.current_limit_slider.setMinimumHeight(50)  # Adjust the height to stop handle icon clipping
 
+        # Create QLineEdit widgets for PID gains
+        self.Kp_textbox = QLineEdit(str(self.Kp))
+        self.Ki_textbox = QLineEdit(str(self.Ki))
+        self.Kd_textbox = QLineEdit(str(self.Kd))
+
+        # Create labels for the PID gain textboxes
+        Kp_label = QLabel('Kp:')
+        Ki_label = QLabel('Ki:')
+        Kd_label = QLabel('Kd:')
+
+        # Add a button to update the PID gains
+        update_pid_button = QPushButton("Update PID Gains")
+        update_pid_button.clicked.connect(self.update_pid_gains)
+
+        horizontal_layout = QHBoxLayout()
+        horizontal_layout.addWidget(Kp_label)
+        horizontal_layout.addWidget(self.Kp_textbox)
+        horizontal_layout.addWidget(Ki_label)
+        horizontal_layout.addWidget(self.Ki_textbox)
+        horizontal_layout.addWidget(Kd_label)
+        horizontal_layout.addWidget(self.Kd_textbox)
+        horizontal_layout.addWidget(update_pid_button)
+        # Create a container widget for the horizontal layout
+        horizontal_container = QWidget()
+
+        # Set the horizontal layout as the layout for the container widget
+        horizontal_container.setLayout(horizontal_layout)
+
         # Create the layout and add widgets
         layout = QVBoxLayout()
         layout.addWidget(self.torque_checkbox)
@@ -129,6 +166,7 @@ class JoyLab(QMainWindow):
         layout.addWidget(self.joystick_mode_dropdown)
         layout.addWidget(servo_mode_label)
         layout.addWidget(self.servo_mode_dropdown)
+        layout.addWidget(horizontal_container)
         layout.addWidget(slider_label)
         layout.addWidget(self.current_limit_slider)
         layout.addWidget(self.plot)
@@ -161,8 +199,7 @@ class JoyLab(QMainWindow):
     def on_servo_mode_changed(self, index):
         selected_option = self.servo_mode_dropdown.itemText(index)
         self.servo_mode = selected_option
-        servo_modes_map = {'Position Control': 3, 'Current Based Position Control': 5, 'Current PID Position Control': 0}
-        self.serial_manager.send_message('set_servo_mode', [servo_modes_map[selected_option]])
+        self.serial_manager.send_message('set_servo_mode', [self.servo_modes_map[selected_option]])
 
     def on_current_limit_changed(self, value):
         self.serial_manager.send_message('set_current_limit', [value])
@@ -171,6 +208,11 @@ class JoyLab(QMainWindow):
         if self.servo_mode == 'Current Based Position Control':
             self.serial_manager.send_message('set_servo_mode', [3])
             self.serial_manager.send_message('set_servo_mode', [5])
+
+    def update_pid_gains(self):
+        self.Kp = float(self.Kp_textbox.text())
+        self.Ki = float(self.Ki_textbox.text())
+        self.Kd = float(self.Kd_textbox.text())
 
     def on_toggle_torque(self, state):
         if state == Qt.Checked:
@@ -215,7 +257,6 @@ class JoyLab(QMainWindow):
         except TypeError:
             pass
         self.timestamps.append(time.time())
-        #self.update_plot(pos)
 
     def mouse_control(self, pos):
         self.user_mouse_pos = [int(pos[0]), int(pos[1])]
@@ -229,17 +270,47 @@ class JoyLab(QMainWindow):
                 goal_pos = self.user_mouse_pos if self.user_is_dragging else self.present_positions[-1]
             case 'Walls':
                 pass
-            case 'Maze':
-                pass
         if goal_pos is not None:
             self.goal_positions.append(goal_pos)
         return goal_pos
 
     def calculate_pid_currents(self):
-        if self.user_mouse_pos is None:
-            return None  # in future, should match self.joystick_mode
-        else:
-            return None
+        if len(self.goal_positions) == 0 or len(self.present_positions) == 0:
+            return [0, 0]  # Return zero currents if there's no data
+
+        # Determine the reference position based on joystick mode and user dragging
+        reference_pos = None
+        match self.joystick_mode:
+            case 'Center':
+                reference_pos = self.user_mouse_pos if self.user_is_dragging else self.center_pos
+            case 'Follow':
+                reference_pos = self.user_mouse_pos if self.user_is_dragging else self.present_positions[-1]
+            case 'Walls':
+                pass  # Implement your logic for 'Walls' mode here if needed
+
+        if reference_pos is None:
+            return [0, 0]  # Return zero currents if there's no reference position
+
+        # Calculate the error for each servo
+        error = np.array(reference_pos) - np.array(self.present_positions[-1])
+
+        # Calculate the integral of the error for each servo
+        self.integral += error
+
+        # Calculate the derivative of the error for each servo
+        derivative = error - np.array(self.prev_errors[-1])
+
+        # Calculate PID output for each servo
+        output = self.Kp * np.array(error, dtype=float) + self.Ki * np.array(self.integral, dtype=float) + \
+                 self.Kd * np.array(derivative, dtype=float)
+
+        # Clip the output to be within the range [-100, 100]
+        output = np.clip(output, -100, 100)
+
+        # Update the previous errors deque
+        self.prev_errors.append(error)
+
+        return output.tolist()
 
     def start_test_sequence_thread(self):
         """
@@ -254,6 +325,8 @@ class JoyLab(QMainWindow):
 
         """
         self.is_test_sequence_running = True
+        servo_mode_before_test = self.servo_mode
+        self.serial_manager.send_message('set_servo_mode', [3])
         radius_in_encoder_ticks = 300
 
         # Circle in one direction
@@ -312,12 +385,12 @@ class JoyLab(QMainWindow):
                 y = int(self.center_pos[1] + radius * np.sin(angle))
                 self.serial_manager.send_message('goal_positions', [x, y])
         """
-
+        self.servo_mode = servo_mode_before_test
+        self.serial_manager.send_message('set_servo_mode', self.servo_modes_map[servo_mode_before_test])
         self.is_test_sequence_running = False
 
 
 class SerialManager(QObject):
-
     new_position_signal = pyqtSignal(list)
 
     def __init__(self, joy, port, baudrate=1000000):
