@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QComboBox, QSlider, QLabel, QCheckBox, \
     QPushButton, QLineEdit, QHBoxLayout
 from PyQt5.QtCore import pyqtSignal, QObject, Qt, QTimer, QSize
-from pyqtgraph import PlotWidget
+from pyqtgraph import PlotWidget, ImageItem
 import sys
 import serial
 import threading
@@ -22,8 +22,8 @@ class CustomPlotWidget(PlotWidget):
         self.setMouseTracking(True)
         self.mouse_dragging = False
         self.plotItem.vb.setMouseEnabled(x=False, y=False)
-        self.plotItem.vb.setXRange(2000, 3200)
-        self.plotItem.vb.setYRange(2000, 3350)
+        self.plotItem.vb.setXRange(0, 1)
+        self.plotItem.vb.setYRange(0, 1)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_mouse_pos)
         self.timer.setInterval(16)
@@ -66,7 +66,10 @@ class JoyLab(QMainWindow):
         self.user_is_dragging = False  # For overriding controls with user input
         self.is_test_sequence_running = False  # For overriding controls with test sequence
         self.user_mouse_pos = None  # For storing the user's mouse position
-        self.center_pos = [2589, 2667]
+        self.center_pos = [2589, 2667]  # Center position of joystick
+        self.range = 600  # Range of joystick
+        self.in_bounds = True  # Whether the joystick is in bounds defined for walls mode
+        self.prev_in_bounds = True  # Whether the joystick was in bounds in the previous iteration
         self.servo_modes_map = {'Position Control': 3, 'Current Based Position Control': 5,
                                 'Current PID Position Control': 0}
 
@@ -89,6 +92,17 @@ class JoyLab(QMainWindow):
         # Plot for joystick position
         self.plot = CustomPlotWidget(self)
         self.plot.setFixedSize(QSize(300, 300))
+
+        # Walls mode boundary image
+        self.boundary_image = np.zeros((1000, 1000))
+        self.boundary_image[250:750, 250:750] = 255
+
+        # Create an ImageItem
+        self.img_item = ImageItem(image=self.boundary_image)
+
+        # Set the position and scale to fit within the normalized range
+        self.img_item.setPos(0, 0)
+        self.img_item.setScale(0.001)  # Scale down to fit within 0 to 1
 
         # Plot for error
         self.error_plot = CustomPlotWidget(self)
@@ -221,11 +235,16 @@ class JoyLab(QMainWindow):
             self.serial_manager.send_message('toggle_torque', [0])
 
     def update_plot(self):
+
         # Update joystick plot
         if len(self.present_positions) > 0:  # Check if we have any data to plot
-            last_pos = self.present_positions[-1]  # Get the most recent position
+            last_pos_norm = self.encoder_to_norm(self.present_positions[-1])  # Get the most recent position
             self.plot.clear()
-            self.plot.plot([last_pos[0]], [last_pos[1]], pen=None,
+
+            # Add the ImageItem to the PlotWidget
+            if self.joystick_mode == 'Walls':
+                self.plot.addItem(self.img_item)
+            self.plot.plot([last_pos_norm[0]], [last_pos_norm[1]], pen=None,
                            symbol='o', symbolPen=None, symbolSize=10, symbolBrush=(255, 0, 0, 255))
 
         # Update error plot
@@ -259,7 +278,33 @@ class JoyLab(QMainWindow):
         self.timestamps.append(time.time())
 
     def mouse_control(self, pos):
-        self.user_mouse_pos = [int(pos[0]), int(pos[1])]
+        encoder = self.norm_to_encoder([pos[0], pos[1]])
+        self.user_mouse_pos = [int(encoder[0]), int(encoder[1])]
+
+    def find_nearest_boundary_point(self, img_x, img_y):
+        # Initialize variables to hold the nearest point
+        nearest_x, nearest_y = img_x, img_y
+        min_distance = float('inf')  # Initialize to a large value
+
+        # Define a search radius (this can be adjusted)
+        search_radius = 100
+
+        # Search along each axis
+        for d in range(1, search_radius + 1):
+            for dx, dy in [(d, 0), (-d, 0), (0, d), (0, -d)]:  # Right, Left, Up, Down
+                # Calculate the coordinates of the pixel to check
+                check_x, check_y = img_x + dx, img_y + dy
+
+                # Make sure the coordinates are within the image boundaries
+                if 0 <= check_x < self.boundary_image.shape[1] and 0 <= check_y < self.boundary_image.shape[0]:
+                    # Check if the pixel is white
+                    if self.boundary_image[check_y, check_x] == 255:
+                        distance = abs(dx) + abs(dy)  # Manhattan distance
+                        if distance < min_distance:
+                            min_distance = distance
+                            nearest_x, nearest_y = check_x, check_y
+
+        return nearest_x, nearest_y  # Return the nearest point found
 
     def calculate_standard_position(self):
         goal_pos = None
@@ -269,7 +314,26 @@ class JoyLab(QMainWindow):
             case 'Follow':
                 goal_pos = self.user_mouse_pos if self.user_is_dragging else self.present_positions[-1]
             case 'Walls':
-                pass
+                # Proposed next position
+                proposed_goal_pos = self.user_mouse_pos if self.user_is_dragging else self.present_positions[-1]
+                norm_proposed_goal_pos = self.encoder_to_norm(proposed_goal_pos)
+
+                # Convert the normalized proposed position to image coordinates
+                img_x, img_y = int(norm_proposed_goal_pos[0] * self.boundary_image.shape[1]), int(
+                    norm_proposed_goal_pos[1] * self.boundary_image.shape[0])
+
+                # Check if the proposed position is within the white region of the boundary image
+                if self.boundary_image[img_y, img_x] == 255:
+                    self.in_bounds = True
+                    goal_pos = proposed_goal_pos
+                else:
+                    self.in_bounds = False
+                    # Find the nearest point within the boundary
+                    nearest_x, nearest_y = self.find_nearest_boundary_point(img_x, img_y)
+
+                    # Convert the image coordinates back to encoder coordinates
+                    goal_pos = self.norm_to_encoder([nearest_x / self.boundary_image.shape[1], nearest_y / self.boundary_image.shape[0]])
+
         if goal_pos is not None:
             self.goal_positions.append(goal_pos)
         return goal_pos
@@ -286,7 +350,7 @@ class JoyLab(QMainWindow):
             case 'Follow':
                 reference_pos = self.user_mouse_pos if self.user_is_dragging else self.present_positions[-1]
             case 'Walls':
-                pass  # Implement your logic for 'Walls' mode here if needed
+                pass  # Implement your logic for 'Walls' mode
 
         if reference_pos is None:
             return [0, 0]  # Return zero currents if there's no reference position
@@ -389,6 +453,30 @@ class JoyLab(QMainWindow):
         self.serial_manager.send_message('set_servo_mode', self.servo_modes_map[servo_mode_before_test])
         self.is_test_sequence_running = False
 
+    def norm_to_encoder(self, norm_coord):
+        """
+        Convert a normalized position to an encoder position.
+        :param norm_coord: Normalized position in the range [0, 1] for both axes
+        :return: Encoder position in the range self.center_pos +- 600 for both axes
+        """
+        encoder_coord = [
+            int(norm * self.range * 2 - self.range + center)
+            for norm, center in zip(norm_coord, self.center_pos)
+        ]
+        return encoder_coord
+
+    def encoder_to_norm(self, encoder_coord):
+        """
+        Convert an encoder position to a normalized position.
+        :param encoder_coord: Encoder position in the range self.center_pos +- 600 for both axes
+        :return: Normalized position in the range [0, 1] for both axes
+        """
+        norm_coord = [
+            (encoder - center + self.range) / (self.range * 2)
+            for encoder, center in zip(encoder_coord, self.center_pos)
+        ]
+        return norm_coord
+
 
 class SerialManager(QObject):
     new_position_signal = pyqtSignal(list)
@@ -430,11 +518,28 @@ class SerialManager(QObject):
 
     def main_loop(self):
         while True:
-            positions = self.read_servo_positions()
+            try:
+                positions = self.read_servo_positions()
+            except ValueError:
+                continue
             if positions:
                 self.new_position_signal.emit(positions)
 
             if not self.joylab.is_test_sequence_running:
+
+                # If in walls mode, toggle the torque when the joystick passes a boundary
+                if self.joylab.joystick_mode == 'Walls':
+                    if self.joylab.in_bounds != self.joylab.prev_in_bounds:
+                        print("Change detected: ", self.joylab.prev_in_bounds, " -> ", self.joylab.in_bounds, "")
+                        # Update the previous state
+                        self.joylab.prev_in_bounds = self.joylab.in_bounds
+
+                        # Toggle the torque based on the new state
+                        if self.joylab.in_bounds:
+                            self.send_message('toggle_torque', [0])  # Torque off
+                        else:
+                            self.send_message('toggle_torque', [1])  # Torque on
+
                 match self.joylab.servo_mode:
                     case 'Current Based Position Control':
                         positions = self.joylab.calculate_standard_position()
